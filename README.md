@@ -1,43 +1,122 @@
 # Hackathon-143
-import tkinter as tk
-from tkinter import messagebox
+import cv2
+import threading
+import platform
+import time
+import numpy as np
 
-# --- Functions ---
-def open_account():
-    messagebox.showinfo("Open Account", "Opening a new account...")
+# Load Haar cascades
+face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+eye_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_eye.xml')
 
-def deposit_money():
-    messagebox.showinfo("Deposit", "Deposit money into account...")
+# Beep control
+beeping = False
+stop_beep_flag = False
 
-def withdraw_money():
-    messagebox.showinfo("Withdraw", "Withdraw money from account...")
+def continuous_beep():
+    global beeping, stop_beep_flag
+    beeping = True
+    while not stop_beep_flag:
+        if platform.system() == 'Windows':
+            import winsound
+            winsound.Beep(1000, 500)  # frequency, duration
+        else:
+            print("\a", end='', flush=True)
+            time.sleep(0.5)
+    beeping = False
 
-def check_balance():
-    messagebox.showinfo("Balance", "Checking account balance...")
+# Function to adjust brightness & contrast automatically
+def enhance_frame(frame):
+    # Convert to YUV for brightness adjustment
+    yuv = cv2.cvtColor(frame, cv2.COLOR_BGR2YUV)
+    yuv[:, :, 0] = cv2.equalizeHist(yuv[:, :, 0])  # Equalize brightness channel
+    frame = cv2.cvtColor(yuv, cv2.COLOR_YUV2BGR)
 
-# --- Main Window ---
-root = tk.Tk()
-root.title("Bank Management System")
-root.geometry("400x300")
+    # Gamma correction for low light
+    gamma = 1.5  # Higher = brighter
+    inv_gamma = 1.0 / gamma
+    table = np.array([((i / 255.0) ** inv_gamma) * 255
+                      for i in np.arange(256)]).astype("uint8")
+    frame = cv2.LUT(frame, table)
 
-# Heading
-title_label = tk.Label(root, text="Bank Management System", font=("Arial", 16, "bold"))
-title_label.pack(pady=10)
+    return frame
 
-# Buttons
-btn_open = tk.Button(root, text="Open New Account", width=20, command=open_account)
-btn_open.pack(pady=5)
+# Start webcam
+cap = cv2.VideoCapture(0)
 
-btn_deposit = tk.Button(root, text="Deposit Money", width=20, command=deposit_money)
-btn_deposit.pack(pady=5)
+# Try to set auto exposure (if supported)
+cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.75)
+cap.set(cv2.CAP_PROP_BRIGHTNESS, 0.6)
 
-btn_withdraw = tk.Button(root, text="Withdraw Money", width=20, command=withdraw_money)
-btn_withdraw.pack(pady=5)
+closed_eyes_frames = 0
+ALARM_THRESHOLD = 20  # number of frames to trigger alarm
 
-btn_balance = tk.Button(root, text="Check Balance", width=20, command=check_balance)
-btn_balance.pack(pady=5)
+print("✅ Press 'q' to quit.")
 
-btn_exit = tk.Button(root, text="Exit", width=20, command=root.quit)
-btn_exit.pack(pady=20)
+while True:
+    ret, frame = cap.read()
+    if not ret:
+        break
 
-root.mainloop()
+    # Enhance for better detection in low light
+    frame = enhance_frame(frame)
+
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    faces = face_cascade.detectMultiScale(gray, 1.3, 5)
+
+    face_detected = len(faces) > 0
+    eyes_detected = False
+
+    if face_detected:
+        for (x, y, w, h) in faces:
+            roi_gray = gray[y:y + h, x:x + w]
+            roi_color = frame[y:y + h, x:x + w]
+
+            eyes = eye_cascade.detectMultiScale(roi_gray, 1.1, 5)
+            if len(eyes) > 0:
+                eyes_detected = True
+                for (ex, ey, ew, eh) in eyes:
+                    cv2.rectangle(roi_color, (ex, ey), (ex + ew, ey + eh), (0, 255, 0), 2)
+            break  # Only process first face
+
+    # Logic: no face = distraction, eyes closed = drowsy
+    if not face_detected:
+        alert_reason = "😵 Face Not Detected!"
+        if not beeping:
+            stop_beep_flag = False
+            threading.Thread(target=continuous_beep, daemon=True).start()
+
+    elif not eyes_detected:
+        closed_eyes_frames += 1
+
+        if closed_eyes_frames >= ALARM_THRESHOLD:
+            alert_reason = "😴 Eyes Closed!"
+            if not beeping:
+                stop_beep_flag = False
+                threading.Thread(target=continuous_beep, daemon=True).start()
+        else:
+            alert_reason = None
+
+    else:
+        closed_eyes_frames = 0
+        alert_reason = None
+        if beeping:
+            stop_beep_flag = True  # Stop beep when attention is OK
+
+    # Show alert text
+    if alert_reason:
+        cv2.putText(frame, alert_reason, (30, 50),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 3)
+    else:
+        cv2.putText(frame, "✅ All Good", (30, 50),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 2)
+
+    cv2.imshow("Drowsiness + Distraction Detection (Low Light Enhanced)", frame)
+
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
+
+# Cleanup
+stop_beep_flag = True
+cap.release()
+cv2.destroyAllWindows()
